@@ -1,0 +1,213 @@
+---
+#Task file for the Utility-Hypervisor
+#Registering system with RHN.
+- name: rhn | registering system with RHN
+  command: /usr/bin/subscription-manager register --username={{ rhn_user }} --password={{ rhn_password }} --name={{ hostname_full }}
+  tags:
+    - rhn
+  ignore_errors: yes
+
+#Enabling the repos
+- name: rhn | enabling the right repos
+  command: /usr/bin/subscription-manager repos --disable "*" --enable rhel-7-server-rpms --enable rhel-7-server-rh-common-rpms --enable rhel-server-rhscl-7-rpms
+  tags:
+    - rhn
+  ignore_errors: yes
+
+#Installing the Software
+- name: installing | installing the required software
+  become: yes
+  yum:
+    name: "{{ item }}"
+    state: latest
+  with_items:
+    - libguestfs-tools
+    - libvirt
+    - qemu-kvm
+    - virt-manager
+    - virt-install
+    - xorg-x11-apps
+    - xauth
+    - virt-viewer
+    - libguestfs-xfs
+  notify: enable_service_libvirtd
+  tags:
+    - install_kvm
+
+- name: installing | installing rhel-guest-image for templates
+  become: yes
+  yum:
+    name: "{{ item }}"
+    state: latest
+  with_items:
+    - rhel-guest-image-7
+  tags:
+    - install_image
+
+#Create the Red Hat Template at the Utility Utility-Hypervisor
+- name: prepare | create directory for Virtual Machines
+  become: yes
+  file:
+    path: "{{ vm_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: 0755
+    recurse: yes
+  tags:
+    - kvm_template
+
+- name: prepare | create template file
+  become: yes
+  shell: qemu-img create -f qcow2 {{ vm_directory}}/{{ template_name }}.qcow2 {{ template_size }}
+  tags:
+    - kvm_template
+
+
+- name: prepare | register rhel-guest-image-7 name
+  become: yes
+  shell:  ls /usr/share/rhel-guest-image-7/ | grep qcow2
+  register: vm
+  tags:
+    - kvm_template
+
+- debug: var=vm.stdout_lines
+
+- name: prepare | expand file with rhel7-image
+  become: yes
+  shell: virt-resize --expand /dev/sda1 /usr/share/rhel-guest-image-7/{{ item }} {{ vm_directory}}/{{ template_name }}.qcow2
+  with_items: vm.stdout_lines
+  tags:
+    - kvm_template
+
+- name: prepare | set root password
+  become: yes
+  shell: virt-customize -a {{ vm_directory}}/{{ template_name }}.qcow2 --root-password password:{{ root_password }}
+  tags:
+    - kvm_template
+
+- name: prepare | remove cloud init
+  become: yes
+  shell: virt-customize -a {{ vm_directory}}/{{ template_name }}.qcow2 --run-command 'yum remove cloud-init* -y'
+  tags:
+    - kvm_template
+
+#Create Bridges
+- name: prepare | create bridge interface for provisioning network
+  become: yes
+  shell: virsh iface-bridge {{ prov_bridge_interface }} {{ prov_bridge_name }}
+  ignore_errors: yes
+  tags: 
+    - kvm_bridges
+    - prepare
+
+- name: prepare | create bridge interface for external api
+  become: yes
+  shell: virsh iface-bridge {{ extapi_bridge_interface }} {{ extapi_bridge_name }}
+  ignore_errors: yes
+  tags: 
+    - kvm_bridges
+    - prepare
+
+- name: prepare | create bridge interface for internal api
+  become: yes
+  shell: virsh iface-bridge {{ intapi_bridge_interface }} {{ intapi_bridge_name }}
+  ignore_errors: yes
+  tags: 
+    - kvm_bridges
+    - prepare
+
+#Create director machine out of template
+- name: prepare | create virtual machine from template file
+  become: yes
+  shell: qemu-img create -f qcow2 -b {{ vm_directory}}/{{ template_name }}.qcow2 {{ vm_directory}}/{{ undercloud_vm_name }}.qcow2
+  when: create_vm  == "yes"
+  tags: 
+    - template2director
+    - prepare
+
+- name: prepare | set hostname
+  become: yes
+  command: virt-customize -a {{ vm_directory}}/{{ undercloud_vm_name }}.qcow2 --run-command 'hostnamectl set-hostname {{ hostname_full }}'
+  when: create_vm  == "yes"
+  ignore_errors: yes
+  tags: 
+    - template2director
+    - prepare
+
+- name: prepare | clear ifcfg-eth0 file
+  become: yes
+  shell: virt-customize -a {{ vm_directory}}/{{ undercloud_vm_name }}.qcow2 --run-command 'rm /etc/sysconfig/network-scripts/ifcfg-eth0 '
+  when: create_vm  == "yes"
+  ignore_errors: yes
+  tags: 
+    - template2director
+    - prepare
+
+- name: prepare | set ifcfg-eth0 file (provisioning)
+  become: yes
+  shell: virt-customize -a {{ vm_directory}}/{{ undercloud_vm_name }}.qcow2 --run-command 'echo {{ item }}  >> /etc/sysconfig/network-scripts/ifcfg-eth0 '
+  with_items: 
+    - DEVICE="eth0"
+    - ONBOOT="yes"
+    - TYPE="Ethernet"
+    - PEERDNS="yes"
+    - IPV6INIT="no"
+    - IPADDR={{ undercloud_ip_address_prov }}
+    - NETMASK={{ undercloud_ip_netmask_prov }}
+    - GATEWAY={{ undercloud_ip_gateway_prov }}
+    - DNS1={{ dns1 }}
+    - DNS2={{ dns2 }}
+  when: create_vm  == "yes"
+  ignore_errors: yes
+  tags: 
+    - directornetwork
+    - prepare
+
+- name: prepare | set ifcfg-eth1 file (external api)
+  become: yes
+  shell: virt-customize -a {{ vm_directory}}/{{ undercloud_vm_name }}.qcow2 --run-command 'echo {{ item }}  >> /etc/sysconfig/network-scripts/ifcfg-eth0 '
+  with_items: 
+    - DEVICE="eth1"
+    - ONBOOT="yes"
+    - TYPE="Ethernet"
+    - PEERDNS="yes"
+    - IPV6INIT="no"
+    - IPADDR={{ undercloud_ip_address_extapi }}
+    - NETMASK={{ undercloud_ip_netmask_extapi }}
+    - GATEWAY={{ undercloud_ip_gateway_extapi }}
+    - DNS1={{ dns1 }}
+    - DNS2={{ dns2 }}
+  when: create_vm  == "yes"
+  ignore_errors: yes
+  tags: 
+    - directornetwork
+    - prepare
+
+- name: prepare | set ifcfg-eth2 file (internal api)
+  become: yes
+  shell: virt-customize -a {{ vm_directory}}/{{ undercloud_vm_name }}.qcow2 --run-command 'echo {{ item }}  >> /etc/sysconfig/network-scripts/ifcfg-eth0 '
+  with_items: 
+    - DEVICE="eth0"
+    - ONBOOT="yes"
+    - TYPE="Ethernet"
+    - PEERDNS="yes"
+    - IPV6INIT="no"
+    - IPADDR={{ undercloud_ip_address_intapi }}
+    - NETMASK={{ undercloud_ip_netmask_intapi }}
+    - GATEWAY={{ undercloud_ip_gateway_intapi }}
+    - DNS1={{ dns1 }}
+    - DNS2={{ dns2 }}
+  when: create_vm  == "yes"
+  ignore_errors: yes
+  tags: 
+    - directornetwork
+    - prepare
+
+- name: prepare | boot director vm
+  become: yes
+  shell: virt-install --ram {{ memory_size }}  --vcpus {{ cpu_count }}  --os-variant rhel7 --disk path={{ vm_directory}}/{{ undercloud_vm_name }}.qcow2,device=disk,bus=virtio,format=qcow2 --import --noautoconsole --vnc --bridge {{ prov_bridge_name }} --bridge {{ extapi_bridge_name }} --bridge {{ intapi_bridge_name }} --name {{ undercloud_vm_name }}
+  when: create_vm  == "yes"
+  tags: 
+    - bootdirector
+    - prepare
