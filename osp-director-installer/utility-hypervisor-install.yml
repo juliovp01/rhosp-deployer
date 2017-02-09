@@ -1,0 +1,9 @@
+---
+## Role to deploy the Utility Hypervisor
+- name:  Installing and Configuring KVM Host
+  hosts: hypervisor
+  vars_files:
+    - vars/utility-hypervisor-vars:with_items.yml
+  remote_user: root
+  tasks:
+    - include: tasks/utility-hypervisor.yml
